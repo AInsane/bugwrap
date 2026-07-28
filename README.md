@@ -115,9 +115,23 @@ python -m bench.context_bench --scale-only # smart vs full-context token table
 contract-bench seeds real contract bugs (required param added, kwarg renamed, sync→async,
 field removed, override divergence, …) plus **controls where the correct review is
 silence** — flagging anything on them is a false positive. Current: **17 scenarios,
-100% precision / 100% recall**, static layer alone. Scoring follows the
-[Martian code-review-benchmark](https://github.com/withmartian/code-review-benchmark)
-methodology; a [`bench/martian.py`](bench/martian.py) adapter is ready for the head-to-head.
+100% precision / 100% recall**, static layer alone.
+
+**What the benchmarks run on — full transparency:**
+
+| benchmark | corpus | why |
+|---|---|---|
+| contract-bench | synthetic repos generated from [`bench/scenarios.py`](bench/scenarios.py) | every golden bug is runtime-provable (`TypeError`/`AttributeError`), fully reproducible, impossible to cherry-pick — anyone can rerun it in seconds |
+| context-bench | same scenarios + generated repos of 10/50/150 modules | token scaling must be measured on controlled repo sizes |
+| resolver sanity gate | your local CPython stdlib (594 files, 17k symbols) | a real, large, adversarial codebase for call-graph precision |
+
+We deliberately do **not** publish numbers from hand-picked open-source PRs —
+[every vendor's benchmark ranks themselves first](https://deepsource.com/blog/ai-code-review-benchmarks).
+For the head-to-head against CodeRabbit, Greptile, Copilot et al. we target the
+independent [Martian code-review-benchmark](https://github.com/withmartian/code-review-benchmark)
+(50 real PRs with human-verified golden comments, public leaderboard; its Python repo is
+[Sentry](https://github.com/getsentry/sentry)) — a [`bench/martian.py`](bench/martian.py)
+adapter is ready. Academic alternatives are surveyed in [docs/RESEARCH.md](docs/RESEARCH.md).
 
 ## Configuration
 
