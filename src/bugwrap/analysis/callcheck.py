@@ -97,6 +97,12 @@ def _check_removed(unit: ChangeUnit) -> list[Finding]:
         # Only certain resolutions prove the call bound to *this* symbol.
         if impact.hop != 1 or impact.site.resolution not in ("import", "module", "self", "local"):
             continue
+        # Identity, not just name: `subprocess.run()` resolves to subprocess.run,
+        # which merely SHARES a name with a deleted `tasks.run`. The index is
+        # built on the new tree, so a caller whose import was updated in the same
+        # PR resolves to the new location and correctly drops out here too.
+        if impact.site.target != unit.symbol.fqname:
+            continue
         out.append(
             Finding(
                 file=impact.site.path,

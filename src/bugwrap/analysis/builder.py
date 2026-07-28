@@ -248,6 +248,15 @@ def _removed_unit(
         ],
     )
     sites = index.graph.by_name(symbol.short_name, exclude_path=fd.path)
+    # Prefer sites that provably bound to THIS symbol; bare name-matches are only
+    # worth showing when nothing exact exists (dynamic usage hint for the model).
+    exact = [s for s in sites if s.target == symbol.fqname]
+    if exact:
+        sites = exact
+        unit.notes = [
+            "This symbol was deleted or renamed. The call sites below resolved to it "
+            "through their imports and are now broken."
+        ]
     unit.total_callers = len(sites)
     for site in sites[: cfg.max_callers]:
         snippet = _snippet(site, index, cfg.snippet_radius)

@@ -395,6 +395,31 @@ def _():
 # ---------------------------------------------------------------------------
 
 
+@scenario("control_removed_shadows_stdlib")
+def _():
+    # A local function named `run` is deleted; other files call subprocess.run.
+    # Flagging those callers is the false positive that buried a real-world PR
+    # in 95 bogus findings — identity must beat name.
+    return {
+        "files": {
+            "shop/__init__.py": _INIT,
+            "shop/tasks.py": (
+                "def run(job):\n    return job()\n\n\n"
+                "def keep(x):\n    return x\n"
+            ),
+            "shop/scripts.py": (
+                "from subprocess import run\n\n\n"
+                "def deploy():\n"
+                "    return run(['make', 'deploy'], check=True)\n"
+            ),
+        },
+        "change": {
+            "shop/tasks.py": "def keep(x):\n    return x\n"
+        },
+        "golden": [],  # subprocess.run callers are NOT callers of tasks.run
+    }
+
+
 @scenario("control_body_only")
 def _():
     return {
