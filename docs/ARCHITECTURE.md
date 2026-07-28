@@ -104,6 +104,26 @@ flowchart LR
 
 ## Layer by layer
 
+Every layer is achieved with the Python standard library or a CLI the developer
+already has — that is the zero-dependency contract. At a glance:
+
+| # | Layer | Achieved with |
+|---|---|---|
+| 1 | Diff acquisition & parsing | `git` CLI via `subprocess`, `gh` CLI (PRs), `re` (hunk headers), hand-written unified-diff parser |
+| 2 | Symbol extraction | stdlib `ast` — `ast.parse`, `ast.NodeVisitor`, `ast.unparse`, `end_lineno` spans |
+| 3 | Call graph | stdlib `ast` (one `NodeVisitor` pass), `builtins` (guard list), plain `dict` indexes |
+| 4 | Class hierarchy | stdlib `ast` (`ClassDef.bases`), BFS over `dict` adjacency, depth-capped |
+| 5 | Contract deltas | stdlib `ast` — node diffing with `ast.unparse`, `ast.Raise`/`Return`/`Yield` walks |
+| 6 | Field contracts | stdlib `ast` — class-body `Assign`/`AnnAssign` + `self.x` target walk |
+| 7 | Packet builder | pure Python ranking + packing; `git log` (co-change); power-iteration PageRank |
+| 8 | Static re-binder | stdlib `ast` + a hand-written CPython-faithful argument binder; `functools.lru_cache` |
+| 9 | LLM layer | `urllib.request` → Ollama REST (`/api/chat`, JSON-Schema `format`); `concurrent.futures` |
+| 10 | Merge & reporting | `json`, `textwrap`, raw ANSI codes, `gh` CLI; config via `tomllib` |
+
+Not used anywhere: tree-sitter, LSP servers, Jedi/Pyright, networkx, requests,
+pydantic. Each was considered and rejected — the reasons live in
+[RESEARCH.md](RESEARCH.md).
+
 ### 1. Diff acquisition and parsing — `gitio.py`
 
 **Purpose.** Everything the tool knows about "what changed" enters here: working-tree
@@ -113,6 +133,8 @@ synthetic "whole-file" mode (`synthesize_full_review`) that fabricates a `FileDi
 with status `"F"` and every line marked touched. `co_change_counts` mines the last 400
 commits for files that historically ship together (commits touching 2–30 `.py` files
 only — larger sweeps carry no signal).
+
+**Built with.** the `git` CLI driven through `subprocess.run` (`diff`, `show`, `merge-base`, `log --name-only`, `rev-parse`), the `gh` CLI for PR diffs and metadata, and one `re` pattern (`HUNK_RE`) for `@@` hunk headers. The unified-diff parser itself is ~90 lines of hand-written Python — no `difflib`, no external diff library — because it must track old- and new-side line numbers per hunk, which `difflib` does not expose.
 
 **Key data structures.** `Hunk` and `FileDiff` (`models.py`). `FileDiff.new_lines` /
 `old_lines` are the line-precise sets everything downstream keys off. Statuses:
@@ -132,6 +154,8 @@ make the "old source" lookup wrong for PR diffs on out-of-date checkouts.
 **Purpose.** One `ast.parse` per file; `_Collector` records every function, method,
 and class as a `Symbol` with a line-precise span. This is the substrate for
 line→symbol ownership, signature diffing, and snippet slicing.
+
+**Built with.** the stdlib `ast` module, exclusively: `ast.parse` (one parse per file, shared with the call collector), an `ast.NodeVisitor` subclass over `FunctionDef`/`AsyncFunctionDef`/`ClassDef`, `node.end_lineno` for exact spans, `node.decorator_list[0].lineno` for slice starts, and `ast.unparse` to produce normalized signature text (`def f(a, b=1) -> int`). This is why bugwrap is Python-3.11+-only and dependency-free: CPython's own parser is the ground truth, which tree-sitter or regex approaches can only approximate.
 
 **Key data structures.** `Symbol` (`models.py`): `module`, `qualname`
 (`Class.method`), `kind` (`function|method|class`), `lineno` (the `def` line),
@@ -159,6 +183,8 @@ graph does its own resolution).
 AST once, recording every call with a best-effort target fqname and a **resolution
 quality** tag; `CallGraph.link()` binds those edges to real symbols in a second pass
 after all files are indexed.
+
+**Built with.** the same single `ast` pass (`_CallCollector`, an `ast.NodeVisitor` over `Call`, `Attribute`, `Import`, `ImportFrom`, `Assign`, `AnnAssign`), the stdlib `builtins` module (`dir(builtins)` feeds the builtin guard), and `dataclasses.replace` for per-candidate edge copies. The graph itself is plain dictionaries (`_callers`, `_callees`, `_by_name`, `_readers`) — no networkx, no graph library; the operations needed are exact-key lookups, which `dict` already does optimally. Persistence is the mtime+size-keyed JSON cache in `index/__init__.py` (`json` + `dataclasses.asdict`).
 
 **Key data structures.** `CallSite` (`models.py`) — path, line, caller fqname, target
 fqname, raw dotted text, `resolution`, source line text. `CallGraph` holds forward
@@ -213,6 +239,8 @@ as the raw unresolved string.
 subclasses bind to the base method they actually reach, (b) a parent signature change
 lists and checks every override, and (c) field removal walks subclasses.
 
+**Built with.** `ast.unparse` over `ClassDef.bases` at collection time (stored as raw strings on `Symbol.bases`), then pure-Python resolution at link time: dict lookups under the evidence rule, and breadth-first walks over two adjacency dicts (`bases_of`, `subclasses_of`) with a depth cap of 8 and a seen-set. No MRO library, no `inspect` — the repo's classes are never imported or executed.
+
 **Precision rules.** Base resolution uses the same evidence rule as the call resolver
 (same module, or the file imports the base's module) and requires a *unique* match.
 Well-known external bases (`object`, `Exception`, `ABC`, `Protocol`, `Enum`,
@@ -228,6 +256,8 @@ order), no metaclasses, no `__getattr__` forwarding.
 **Purpose.** Decide whether an edit is a local concern (body-only) or a **contract
 change** whose blast radius is every call site. `analyze_symbol` locates the def in
 the old and new source (`find_node`, by dotted qualname) and `compare` diffs them.
+
+**Built with.** stdlib `ast` on both revisions: `find_node` walks the tree by dotted qualname, `params_of` reads `node.args` (posonly/args/vararg/kwonly/kwarg) with `ast.unparse` for annotations and defaults, and `behavior_delta` walks the function's own body for `ast.Raise`, `ast.Return`, `ast.Yield`/`YieldFrom` nodes. The old source comes from `git show <rev>:<path>` (`gitio.show_file`) — no second checkout needed.
 
 **Key data structures.** `Param` (name, kind `posonly|arg|vararg|kwonly|kwarg`,
 annotation, default) and `SignatureDelta` (`models.py`): `kind`
@@ -257,6 +287,8 @@ functions are invisible. Return-shape detection is syntactic only.
 assignments (annotated or plain) plus `self.x` assignments anywhere in the class's own
 methods; `removed_fields` compares base vs new.
 
+**Built with.** stdlib `ast` again: class-body `AnnAssign`/`Assign` targets for declared fields, `ast.walk` over the class's own methods for `self.<name>` assignment targets (`Assign`/`AnnAssign`/`AugAssign` with an `ast.Attribute` target whose value is `Name('self')`), and set arithmetic between the base and new revisions.
+
 **Precision rule (the property-shim rule).** A name is only "removed" if it survives
 as *nothing* — `_exposed_names` includes fields **and** method names, so a field
 renamed behind a `@property` or turned into a method is not a false positive:
@@ -270,6 +302,8 @@ handled by other paths and returns `[]` here.
 
 **Purpose.** Turn diffs + index into `ChangeUnit`s — one self-contained review packet
 per changed symbol.
+
+**Built with.** pure Python over the index: ranking and packing are arithmetic on dataclasses; snippets are string slicing over cached file text; co-change mining is one `git log --name-only` call (`gitio.co_change_counts`); PageRank (`index/rank.py`) is ~40 lines of power iteration over the resolved-edge dict — damping, dangling-mass redistribution, 25 iterations — no numpy, because the stdlib is fast enough (0.2s over 12k stdlib nodes). Token estimation is `len(text)/3.3` — deliberately a heuristic, since the guardrail is Ollama's `truncated` flag, not estimator precision.
 
 **Key data structures.** `ChangeUnit` and `ImpactSite` (`models.py`). An `ImpactSite`
 carries the call site, a line-numbered snippet (± `snippet_radius` lines, `>` marker
@@ -326,6 +360,8 @@ linter/SAST layer that gives commercial reviewers their precision. When a signat
 changed, re-bind every known call site against the new signature exactly the way
 CPython would, and report only what provably no longer binds.
 
+**Built with.** stdlib `ast` to locate the exact `ast.Call` node at each site (`functools.lru_cache`-cached parses, keyed by source text — never by `id()`), plus `bind_call`: a hand-written re-implementation of CPython's argument-binding rules (positional fill, keyword matching, posonly/kwonly constraints, vararg/kwarg widening) over our `Param` model. Python's own `inspect.Signature.bind` is *not* used because it would require importing the target module — executing repo code — whereas this binder works from the AST alone.
+
 **Crucially, it does not run on the packed packet.** `api.static_check` rebuilds each
 unit's caller list from the *full* graph (`callers_of` / `by_name`), uncapped —
 packing exists for the model's context window; this check is free.
@@ -364,6 +400,8 @@ hatch, and JSON-Schema-constrained output (Ollama's `format` parameter) so parsi
 needs no regex archaeology (though `_load_json` still recovers objects wrapped in
 prose or fences by thinking models).
 
+**Built with.** stdlib `urllib.request` speaking Ollama's REST API (`POST /api/chat` with `format=<JSON Schema>` for constrained decoding, `/api/tags`, `/api/show`) — no `requests`, no `httpx`, no `ollama-python`; `concurrent.futures.ThreadPoolExecutor` for `workers` parallel packets; `json` + one `re` pattern for fence-wrapped recovery. The whole client is ~150 lines, so another backend (an API model) is an afternoon, not a dependency decision.
+
 **Flow (`review_units`):** a `ThreadPoolExecutor` (`workers`) maps packets to
 `client.chat(SYSTEM, render_unit(unit, known), schema=FINDINGS_SCHEMA)`. Known static
 findings for the unit's symbol are injected into the prompt under "ALREADY FLAGGED BY
@@ -390,6 +428,8 @@ and clamp.
 **Merge suppression (`merge_findings`).** Static findings own their lines: an LLM
 finding within ±1 line of a static-covered `(file, line)` is the same issue reworded
 and is dropped.
+
+**Built with.** `json` for machine output, `textwrap` for terminal wrapping, hand-rolled ANSI escape codes honoring `NO_COLOR`/`FORCE_COLOR` (no rich/colorama), the `gh` CLI via `subprocess` for GitHub PR comments, and `tomllib` (stdlib since 3.11) for `.bugwrap.toml` — the reason the config format is TOML and the floor is Python 3.11.
 
 **Postprocess (`postprocess`).** Confidence floor (`min_confidence`, default 0.45 —
 local models over-report), dedupe on `(file, line, lowercased title)`, then sort by
