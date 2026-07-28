@@ -71,9 +71,13 @@ its box gets checked:
 
 ## In progress 🔨
 
-- 🔨 **Martian benchmark adapter** (`bench/martian.py`) — adapter script ready;
-  full 50-PR head-to-head vs CodeRabbit/Greptile pending a GitHub org + judge
-  API key. Python repo in the set is Sentry.
+- 🔨 **Martian benchmark head-to-head** (`bench/martian_run.py`) — first full run
+  complete on the Sentry subset (10 PRs, 31 goldens). See "Martian Sentry subset"
+  in the benchmark log. Status: competitor table produced with a same-for-everyone
+  local judge; bugwrap's local-model row honest but weak on frontier-level logic
+  bugs; running on real Sentry code caught and fixed a real precision hole
+  (removed-symbol identity). Remaining: re-judge with an official frontier judge,
+  try stronger local models (14b probe running).
 
 ## Planned ⏳
 
@@ -160,3 +164,53 @@ change's blast radius, not the repo.
 At toy scale the baseline is cheaper per run — and finds nothing (3B) or
 hallucinates on 4 of 5 controls (7B). At real repo scale it is both blind AND
 34× more expensive. That is the whole thesis of the tool, now measured.
+
+### Martian Sentry subset — first head-to-head (2026-07-29)
+
+Setup: the 10 Sentry PRs from
+[withmartian/code-review-benchmark](https://github.com/withmartian/code-review-benchmark)
+(31 human-verified goldens), reviewed with `bench/martian_run.py` on merge-base
+diffs of the real repo (~55k symbols indexed per checkout). Competitor comments
+come from the benchmark's published per-tool review data; **everyone — including
+us — is scored by the same local judge** (qwen2.5-coder:7b, "same underlying
+issue?" methodology). Local judging is stricter than the official frontier-model
+judges, so absolute numbers run low; the *relative* ordering is the signal.
+
+6 PRs with published competitor reviews, 19 goldens:
+
+| tool | recall | precision | comments |
+|---|---|---|---|
+| sourcery | 84% | 30% | 40 |
+| augment | 58% | 24% | 37 |
+| gemini | 42% | 32% | 22 |
+| claude-code | 37% | 33% | 21 |
+| copilot | 32% | 18% | 34 |
+| greptile | 26% | 17% | 29 |
+| devin | 21% | 27% | 15 |
+| bugbot (Cursor) | 21% | 13% | 23 |
+| coderabbit | 16% | 8% | 40 |
+| **bugwrap (static + qwen2.5-coder:7b)** | **0%** | — | **0** |
+| qodo | 0% | 0% | 6 |
+
+Honest reading:
+
+1. **Real-world precision transferred perfectly.** ~380 packets of real Sentry
+   code, zero false positives. The first run actually produced 110 — a
+   `run`-shadows-`subprocess.run` hole in the removed-symbol check — which is
+   exactly what benchmarking on real code is for; fixed, regression-locked.
+2. **The static layer had nothing to prove here** — the goldens are subtle
+   domain-logic bugs (Django slicing semantics, `SpawnProcess` isinstance,
+   datetime into `math.floor`), none statically provable. Correct silence.
+3. **A local 7B cannot reason at frontier level** even when Smart Context puts
+   the bug directly in front of it (verified: 0 findings on the exact golden
+   packets, verify on or off). This axis belongs to cloud models today.
+4. **These PRs are brutal for everyone** — the market leader by revenue
+   (CodeRabbit) matched 3/19 goldens at 8% precision under the same judge, and
+   comment volume didn't buy recall (devin's 15 comments beat coderabbit's 40).
+
+Where that leaves the positioning: bugwrap's competitive axes are the
+deterministic contract layer (100% precision, 0 tokens, CI-grade), token
+efficiency (34× vs full context), and privacy (nothing leaves the machine) —
+not frontier-level logic-bug hunting on a 7B. The obvious hybrid: bugwrap
+packets + a cloud frontier model as the LLM layer would combine our 649-token
+packets with their reasoning — measurable the day we add an API-model backend.

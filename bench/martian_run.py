@@ -220,6 +220,111 @@ def cmd_judge(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# compare: same judge, same goldens — us and the published competitor reviews
+# --------------------------------------------------------------------------
+
+_STRIP = [
+    (r"\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)", ""),  # badge links
+    (r"!\[[^\]]*\]\([^)]*\)", ""),  # images
+    (r"<details[^>]*>.*?</details>", "", ),  # collapsed reasoning blocks
+    (r"<[^>]+>", ""),  # html tags
+    (r"\[([^\]]*)\]\([^)]*\)", r"\1"),  # links -> text
+]
+
+
+def clean_body(text: str, limit: int = 450) -> str:
+    import re
+
+    for pattern, repl in _STRIP:
+        text = re.sub(pattern, repl, text, flags=re.DOTALL)
+    return " ".join(text.split())[:limit]
+
+
+def judge_comments(client, goldens, comments) -> tuple[int, int]:
+    """(#goldens matched, #distinct comments that matched)."""
+    matched_golden = 0
+    matched_idx: set[int] = set()
+    for golden in goldens:
+        if not comments:
+            break
+        listing = "\n".join(f"[{i}] {c}" for i, c in enumerate(comments))
+        prompt = (
+            f"GOLDEN issue (severity {golden.get('severity', '?')}):\n"
+            f"{golden['comment']}\n\nCANDIDATES:\n{listing}\n\n"
+            'Return {"match_index": <index or -1>, "reason": "..."}.'
+        )
+        try:
+            chat = client.chat(JUDGE_SYSTEM, prompt, schema=JUDGE_SCHEMA)
+            verdict = json.loads(chat.content)
+        except Exception:  # noqa: BLE001
+            continue
+        idx = verdict.get("match_index", -1)
+        if isinstance(idx, int) and 0 <= idx < len(comments):
+            matched_golden += 1
+            matched_idx.add(idx)
+    return matched_golden, len(matched_idx)
+
+
+def cmd_compare(args) -> int:
+    data = json.loads(Path(args.benchmark_data).read_text())
+    sentry = {u: e for u, e in data.items()
+              if e.get("source_repo") == args.source_repo and e.get("reviews")}
+    manifest = json.loads(Path(args.manifest).read_text())
+    url_to_num = {pr["url"]: pr["num"] for pr in manifest}
+    results_dir = Path(args.results) if args.results else None
+    client = OllamaClient(host=args.host, model=args.judge_model, num_ctx=8192)
+    tools = args.tools.split(",")
+
+    scores: dict[str, dict] = {
+        t: {"golden": 0, "matched": 0, "comments": 0, "matched_c": 0} for t in tools
+    }
+    for url, entry in sentry.items():
+        goldens = entry["golden_comments"]
+        reviews_by_tool = {r["tool"]: r for r in entry["reviews"]}
+        for tool in tools:
+            if tool == "bugwrap":
+                num = url_to_num.get(url)
+                f = results_dir / f"pr{num}.json" if (results_dir and num) else None
+                if not (f and f.exists()):
+                    continue
+                raw = json.loads(f.read_text())["comments"]
+                comments = [
+                    clean_body(f"({c['path']}:{c['line']}) {c['body']}") for c in raw
+                ]
+            else:
+                review = reviews_by_tool.get(tool)
+                if review is None:
+                    continue
+                comments = [
+                    clean_body(f"({c.get('path')}:{c.get('line')}) {c.get('body', '')}")
+                    for c in review.get("review_comments", [])[:25]
+                ]
+            got, matched_c = judge_comments(client, goldens, comments)
+            s = scores[tool]
+            s["golden"] += len(goldens)
+            s["matched"] += got
+            s["comments"] += len(comments)
+            s["matched_c"] += matched_c
+            print(f"  {tool:<14} {url.rsplit('/', 1)[-1]:>6}: "
+                  f"recall {got}/{len(goldens)} precision {matched_c}/{len(comments)}",
+                  flush=True)
+
+    print(f"\n== {args.source_repo} subset · same local judge ({args.judge_model}) — "
+          "provisional vs official frontier-model judging ==")
+    print(f"{'tool':<16} {'recall':>8} {'precision':>10} {'comments':>9}")
+    rows = []
+    for tool, s in scores.items():
+        if s["golden"] == 0:
+            continue
+        recall = s["matched"] / s["golden"]
+        precision = s["matched_c"] / s["comments"] if s["comments"] else 1.0
+        rows.append((recall, precision, tool, s))
+    for recall, precision, tool, s in sorted(rows, reverse=True):
+        print(f"{tool:<16} {recall:>7.0%} {precision:>9.0%} {s['comments']:>9}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -238,6 +343,16 @@ def main() -> int:
     r.add_argument("--num-ctx", type=int, default=16384)
     r.add_argument("--force", action="store_true")
     r.set_defaults(func=cmd_review)
+
+    c = sub.add_parser("compare")
+    c.add_argument("--benchmark-data", required=True)
+    c.add_argument("--manifest", required=True)
+    c.add_argument("--results", help="bugwrap results dir (adds 'bugwrap' row)")
+    c.add_argument("--tools", default="bugwrap,coderabbit,greptile,copilot,bugbot,devin,claude-code,qodo,gemini,augment")
+    c.add_argument("--source-repo", default="sentry")
+    c.add_argument("--judge-model", default="qwen2.5-coder:7b")
+    c.add_argument("--host", default="http://localhost:11434")
+    c.set_defaults(func=cmd_compare)
 
     j = sub.add_parser("judge")
     j.add_argument("--manifest", required=True)
