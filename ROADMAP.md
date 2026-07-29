@@ -73,14 +73,22 @@ its box gets checked:
 
 - 🔨 **Martian benchmark head-to-head** (`bench/martian_run.py`) — first full run
   complete on the Sentry subset (10 PRs, 31 goldens). See "Martian Sentry subset"
-  in the benchmark log. Status: competitor table produced with a same-for-everyone
-  local judge; bugwrap's local-model row honest but weak on frontier-level logic
-  bugs; running on real Sentry code caught and fixed a real precision hole
-  (removed-symbol identity). Remaining: re-judge with an official frontier judge,
-  try stronger local models (14b probe running).
+  in the benchmark log. Competitor table produced with a same-for-everyone local
+  judge; running on real Sentry code caught and fixed a real precision hole
+  (removed-symbol identity). **Local-model ceiling established**: qwen2.5-coder at
+  3B, 7B AND 14B all find zero of the golden logic bugs even with the bug directly
+  in the packet (14B probe: 12 golden packets, 0 findings — and operationally
+  unusable at ~4-50 min/packet on a laptop). The remaining move on this benchmark
+  is the API-model backend below; re-judging with an official frontier judge comes
+  with it.
 
 ## Planned ⏳
 
+- ⏳ **API-model backend** (M) — optional `[model] provider = "api"` mode sending
+  packets to a frontier model instead of Ollama. The Martian run proved the
+  packets put the bug in front of the model and local models can't bite; our
+  649-token packets + frontier reasoning attacks the leaderboard at a cost per
+  PR no cloud tool can match. The `llm/` surface is one ~150-line client.
 - ⏳ **`bugwrap review --pr --post` inline comments** (S) — post per-line review
   comments instead of one summary comment (gh api), matching how CodeRabbit
   comments land
